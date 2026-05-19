@@ -1,0 +1,33 @@
+[package]
+name = "game-dumper"
+version = "1.0.0"
+edition = "2021"
+description = "SDK Dumper - Scans the game process and auto-generates the SDK folder with offsets"
+authors = ["El Escarabajo <https://github.com/Escarabajoz>"]
+license = "MIT"
+repository = "https://github.com/Escarabajoz/ravenswatch-sdk-dumper"
+
+[dependencies]
+colored = "2.1"
+chrono = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = [
+    "processthreadsapi",
+    "memoryapi",
+    "handleapi",
+    "tlhelp32",
+    "psapi",
+    "winnt",
+    "errhandlingapi",
+    "libloaderapi",
+    "wow64apiset",
+    "sysinfoapi",
+    "basetsd"
+]}
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
