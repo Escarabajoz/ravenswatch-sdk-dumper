@@ -1,6 +1,6 @@
 // ============================================================
 // Game SDK Dumper - Rust
-// Scans the game process and auto-generates the SDK folder
+// Escanea el proceso del juego y autogenera la carpeta SDK
 // ============================================================
 
 mod process;
@@ -13,41 +13,42 @@ use std::io::{self, Write};
 
 fn print_banner() {
     println!("{}", r#"
-  ██████╗  █████╗ ███╗   ███╗███████╗    ██████╗ ██╗   ██╗███╗   ███╗██████╗ ███████╗██████╗
+  ██████╗  █████╗ ███╗   ███╗███████╗    ██████╗ ██╗   ██╗███╗   ███╗██████╗ ███████╗██████╗ 
  ██╔════╝ ██╔══██╗████╗ ████║██╔════╝    ██╔══██╗██║   ██║████╗ ████║██╔══██╗██╔════╝██╔══██╗
  ██║  ███╗███████║██╔████╔██║█████╗      ██║  ██║██║   ██║██╔████╔██║██████╔╝█████╗  ██████╔╝
  ██║   ██║██╔══██║██║╚██╔╝██║██╔══╝      ██║  ██║██║   ██║██║╚██╔╝██║██╔═══╝ ██╔══╝  ██╔══██╗
  ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗    ██████╔╝╚██████╔╝██║ ╚═╝ ██║██║     ███████╗██║  ██╗
   ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝    ╚═════╝  ╚═════╝ ╚═╝     ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝
     "#.cyan());
-    println!("{}", "  SDK Dumper v1.0 - Automatic SDK Generator".yellow().bold());
-    println!("{}", "  By El Escarabajo - github.com/Escarabajoz".bright_cyan());
-    println!("{}", "  ═════════════════════════════════════════════".bright_cyan());
+    println!("{}", "  SDK Dumper v1.0 - Generador automático de SDK".yellow().bold());
+    println!("{}", "  ═══════════════════════════════════════════════".bright_cyan());
     println!();
 }
 
 fn main() {
     print_banner();
 
-    print!("{} ", "[?] Process name (e.g. Ravenswatch.exe):".green().bold());
+    // Pedir nombre del proceso
+    print!("{} ", "[?] Nombre del proceso (ej: game.exe):".green().bold());
     io::stdout().flush().unwrap();
     let mut process_name = String::new();
     io::stdin().read_line(&mut process_name).unwrap();
     let process_name = process_name.trim();
 
     if process_name.is_empty() {
-        println!("{}", "[!] Empty process name, exiting...".red());
+        println!("{}", "[!] Nombre de proceso vacío, saliendo...".red());
         return;
     }
 
     println!();
-    println!("{} {}", "[*] Looking for process:".cyan(), process_name.yellow());
+    println!("{} {}", "[*] Buscando proceso:".cyan(), process_name.yellow());
 
+    // Abrir proceso
     let proc = match process::GameProcess::open(process_name) {
         Ok(p) => {
             println!(
                 "{} PID: {} | Base: 0x{:X} | Size: 0x{:X}",
-                "[✓] Process found!".green().bold(),
+                "[✓] Proceso encontrado!".green().bold(),
                 p.pid,
                 p.base_address,
                 p.module_size
@@ -56,63 +57,85 @@ fn main() {
         }
         Err(e) => {
             println!("{} {}", "[✗] Error:".red().bold(), e);
-            println!("{}", "[!] Make sure the game is running and execute as Administrator.".yellow());
+            println!("{}", "[!] Asegúrate de que el juego esté abierto y ejecuta como administrador.".yellow());
             wait_exit();
             return;
         }
     };
 
     println!();
-    println!("{}", "[*] Starting process dump...".cyan().bold());
-    println!("{}", "═".repeat(60).bright_cyan());
+    println!("{}", "[*] Iniciando dump del proceso...".cyan().bold());
+    println!("{}", "════════════════════════════════════════════".bright_cyan());
 
-    println!("{}", "[*] Reading module memory...".cyan());
+    // Leer memoria del módulo
+    println!("{}", "[*] Leyendo memoria del módulo...".cyan());
     let memory = match proc.read_module_memory() {
         Ok(m) => {
-            println!("{} {} bytes read", "[✓]".green().bold(), m.len());
+            println!(
+                "{} {} bytes leídos",
+                "[✓]".green().bold(),
+                m.len()
+            );
             m
         }
         Err(e) => {
-            println!("{} {}", "[✗] Error reading memory:".red(), e);
+            println!("{} {}", "[✗] Error leyendo memoria:".red(), e);
             wait_exit();
             return;
         }
     };
 
+    // Crear el dumper y ejecutar
     let mut game_dumper = dumper::GameDumper::new(&proc, &memory);
 
     println!();
-    println!("{}", "[*] Scanning byte patterns...".cyan().bold());
+    println!("{}", "[*] Escaneando patrones de bytes...".cyan().bold());
+    println!("{}", "────────────────────────────────────────────".bright_cyan());
     game_dumper.scan_all_patterns();
 
     println!();
-    println!("{}", "[*] Scanning game strings...".cyan().bold());
+    println!("{}", "[*] Escaneando strings del juego...".cyan().bold());
+    println!("{}", "────────────────────────────────────────────".bright_cyan());
     game_dumper.scan_all_strings();
 
     println!();
-    println!("{}", "[*] Resolving VTables from constructors...".cyan().bold());
+    println!("{}", "[*] Resolviendo VTables desde constructores...".cyan().bold());
+    println!("{}", "────────────────────────────────────────────".bright_cyan());
     game_dumper.resolve_vtables();
 
+    // Generar SDK
     println!();
-    println!("{}", "[*] Generating SDK folder...".cyan().bold());
+    println!("{}", "[*] Generando carpeta SDK...".cyan().bold());
+    println!("{}", "════════════════════════════════════════════".bright_cyan());
+
     let output_dir = format!("SDK_dumped_{}", process_name.replace(".exe", ""));
     match sdk_generator::generate_sdk(&output_dir, &game_dumper) {
         Ok(count) => {
-            println!("{} {} files generated in '{}'",
-                "[✓] SDK generated successfully!".green().bold(),
-                count, output_dir.yellow());
+            println!();
+            println!(
+                "{} {} archivos generados en '{}'",
+                "[✓] SDK generado exitosamente!".green().bold(),
+                count,
+                output_dir.yellow()
+            );
         }
-        Err(e) => println!("{} {}", "[✗] Error:".red(), e),
+        Err(e) => {
+            println!("{} {}", "[✗] Error generando SDK:".red(), e);
+        }
     }
 
+    // Resumen final
     println!();
+    println!("{}", "════════════════════════════════════════════".bright_cyan());
     game_dumper.print_summary();
+    println!("{}", "════════════════════════════════════════════".bright_cyan());
+
     wait_exit();
 }
 
 fn wait_exit() {
     println!();
-    print!("{}", "[*] Press Enter to exit...".bright_cyan());
+    print!("{}", "[*] Presiona Enter para salir...".bright_cyan());
     io::stdout().flush().unwrap();
     let mut _input = String::new();
     io::stdin().read_line(&mut _input).unwrap();
