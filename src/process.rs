@@ -24,6 +24,7 @@ pub struct GameProcess {
     pub pid: u32,
     pub base_address: usize,
     pub module_size: usize,
+    #[allow(dead_code)] // conservado para diagnósticos / futura salida de logs
     pub process_name: String,
 }
 
@@ -110,9 +111,9 @@ impl GameProcess {
             let count = needed as usize / mem::size_of::<HMODULE>();
             let target = name.to_lowercase();
 
-            for i in 0..count {
+            for &module in modules.iter().take(count) {
                 let mut mod_name: [u16; MAX_PATH] = [0; MAX_PATH];
-                GetModuleBaseNameW(handle, modules[i], mod_name.as_mut_ptr(), MAX_PATH as DWORD);
+                GetModuleBaseNameW(handle, module, mod_name.as_mut_ptr(), MAX_PATH as DWORD);
                 let mod_str = OsString::from_wide(
                     &mod_name[..mod_name.iter().position(|&c| c == 0).unwrap_or(0)]
                 );
@@ -122,7 +123,7 @@ impl GameProcess {
                     let mut mod_info: MODULEINFO = mem::zeroed();
                     GetModuleInformation(
                         handle,
-                        modules[i],
+                        module,
                         &mut mod_info,
                         mem::size_of::<MODULEINFO>() as DWORD,
                     );
@@ -210,6 +211,7 @@ impl GameProcess {
     }
 
     /// Lee bytes en una dirección específica
+    #[allow(dead_code)] // API de lectura en runtime (resolución dinámica de offsets)
     pub fn read_bytes(&self, address: usize, size: usize) -> Result<Vec<u8>, String> {
         let mut buffer = vec![0u8; size];
         let mut bytes_read: usize = 0;
@@ -233,30 +235,35 @@ impl GameProcess {
     }
 
     /// Lee un valor u64 en una dirección
+    #[allow(dead_code)]
     pub fn read_u64(&self, address: usize) -> Result<u64, String> {
         let bytes = self.read_bytes(address, 8)?;
         Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
     }
 
     /// Lee un valor u32 en una dirección
+    #[allow(dead_code)]
     pub fn read_u32(&self, address: usize) -> Result<u32, String> {
         let bytes = self.read_bytes(address, 4)?;
         Ok(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
     }
 
     /// Lee un valor i32 en una dirección
+    #[allow(dead_code)]
     pub fn read_i32(&self, address: usize) -> Result<i32, String> {
         let bytes = self.read_bytes(address, 4)?;
         Ok(i32::from_le_bytes(bytes[..4].try_into().unwrap()))
     }
 
     /// Lee un valor f32 en una dirección
+    #[allow(dead_code)]
     pub fn read_f32(&self, address: usize) -> Result<f32, String> {
         let bytes = self.read_bytes(address, 4)?;
         Ok(f32::from_le_bytes(bytes[..4].try_into().unwrap()))
     }
 
     /// Lee un string (null-terminated) en una dirección
+    #[allow(dead_code)]
     pub fn read_string(&self, address: usize, max_len: usize) -> Result<String, String> {
         let bytes = self.read_bytes(address, max_len)?;
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());

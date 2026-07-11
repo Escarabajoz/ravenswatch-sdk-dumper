@@ -5,6 +5,7 @@
 
 /// Resultado de un escaneo de patrón
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `offset` forma parte de la API pública del ScanResult
 pub struct ScanResult {
     /// Offset relativo al inicio del módulo
     pub offset: usize,
@@ -51,6 +52,7 @@ pub fn pattern_scan(memory: &[u8], pattern: &str, base_address: usize) -> Vec<Sc
 }
 
 /// Escanea un patrón y devuelve solo el primer resultado
+#[allow(dead_code)] // helper de conveniencia de la API de scanning
 pub fn pattern_scan_first(memory: &[u8], pattern: &str, base_address: usize) -> Option<ScanResult> {
     let parsed = parse_pattern(pattern);
     if parsed.is_empty() {
@@ -94,12 +96,15 @@ pub fn scan_string(memory: &[u8], target: &str, base_address: usize) -> Vec<Scan
 
     for i in 0..=(memory.len() - target_bytes.len()) {
         if &memory[i..i + target_bytes.len()] == target_bytes {
-            // Verificar que es un string completo (null terminated o separado)
+            // Verificar que es un string completo y no un substring de otro token.
+            // Ambos límites deben ser un separador válido (inicio/fin de buffer,
+            // null terminator, o carácter no alfanumérico) para descartar
+            // coincidencias como "Item" dentro de "ItemSelectable".
             let before_ok = i == 0 || memory[i - 1] == 0 || !memory[i - 1].is_ascii_alphanumeric();
             let after_pos = i + target_bytes.len();
             let after_ok = after_pos >= memory.len() || memory[after_pos] == 0 || !memory[after_pos].is_ascii_alphanumeric();
 
-            if before_ok || after_ok {
+            if before_ok && after_ok {
                 results.push(ScanResult {
                     offset: i,
                     address: base_address + i,
@@ -112,6 +117,7 @@ pub fn scan_string(memory: &[u8], target: &str, base_address: usize) -> Vec<Scan
 }
 
 /// Busca todas las strings legibles en un rango de memoria
+#[allow(dead_code)] // utilidad para volcados exploratorios de strings
 pub fn scan_all_strings(memory: &[u8], base_address: usize, min_length: usize) -> Vec<(usize, String)> {
     let mut results = Vec::new();
     let mut current_string = Vec::new();
@@ -144,6 +150,7 @@ pub fn scan_all_strings(memory: &[u8], base_address: usize, min_length: usize) -
 }
 
 /// Busca referencias a una dirección (LEA, MOV con RIP-relative)
+#[allow(dead_code)] // usado para resolución manual de XRefs
 pub fn scan_references(memory: &[u8], target_address: usize, base_address: usize) -> Vec<ScanResult> {
     let mut results = Vec::new();
 
@@ -180,6 +187,26 @@ pub fn scan_references(memory: &[u8], target_address: usize, base_address: usize
     }
 
     results
+}
+
+/// Si en `offset` hay una instrucción `LEA reg, [rip+disp]`
+/// (REX.W/REX.R + 0x8D + ModR/M con mod=00,rm=101), devuelve la dirección
+/// absoluta que carga. Devuelve `None` si los bytes no son ese LEA.
+/// Centraliza el reconocimiento del patrón usado en todo el dumper.
+pub fn try_resolve_lea_at(memory: &[u8], offset: usize, base_address: usize) -> Option<usize> {
+    if offset + 7 > memory.len() {
+        return None;
+    }
+    let has_rex = memory[offset] == 0x48 || memory[offset] == 0x4C;
+    let is_lea = memory[offset + 1] == 0x8D;
+    if !(has_rex && is_lea) {
+        return None;
+    }
+    // mod=00, rm=101 (RIP-relative) -> modrm & 0xC7 == 0x05
+    if memory[offset + 2] & 0xC7 != 0x05 {
+        return None;
+    }
+    resolve_rip_relative(memory, offset, base_address, 7)
 }
 
 /// Resuelve una dirección RIP-relative desde un offset en memoria
@@ -247,5 +274,36 @@ mod tests {
         memory[10 + test_str.len()] = 0; // null terminator
         let results = scan_string(&memory, "Player location", 0x140000000);
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_string_scan_rejects_substring() {
+        // "Item" no debe coincidir dentro de "ItemSelectable"
+        let memory = b"\0ItemSelectable\0".to_vec();
+        assert!(scan_string(&memory, "Item", 0).is_empty());
+        assert_eq!(scan_string(&memory, "ItemSelectable", 0).len(), 1);
+        // pero sí como token independiente
+        let standalone = b"\0Item\0".to_vec();
+        assert_eq!(scan_string(&standalone, "Item", 0).len(), 1);
+    }
+
+    #[test]
+    fn test_try_resolve_lea_at() {
+        let base = 0x140000000usize;
+        // LEA rax, [rip+0x10]: 48 8D 05 10 00 00 00 -> base + 7 + 0x10
+        let mem = vec![0x48, 0x8D, 0x05, 0x10, 0x00, 0x00, 0x00];
+        assert_eq!(try_resolve_lea_at(&mem, 0, base), Some(base + 7 + 0x10));
+        // REX.R + reg r9: 4C 8D 0D ...
+        let mem_r = vec![0x4C, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(try_resolve_lea_at(&mem_r, 0, base), Some(base + 7));
+        // MOV, no LEA -> None
+        let mem_mov = vec![0x48, 0x89, 0x05, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(try_resolve_lea_at(&mem_mov, 0, base), None);
+        // LEA con desplazamiento por registro (modrm != RIP) -> None
+        let mem_reg = vec![0x48, 0x8D, 0x40, 0x10, 0x00, 0x00, 0x00];
+        assert_eq!(try_resolve_lea_at(&mem_reg, 0, base), None);
+        // desplazamiento negativo (-7) -> base
+        let mem_neg = vec![0x48, 0x8D, 0x05, 0xF9, 0xFF, 0xFF, 0xFF];
+        assert_eq!(try_resolve_lea_at(&mem_neg, 0, base), Some(base));
     }
 }
