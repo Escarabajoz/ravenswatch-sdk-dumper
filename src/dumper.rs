@@ -16,6 +16,10 @@ pub struct DumpedOffset {
     pub rva: usize, // Relative Virtual Address
     pub offset_type: OffsetType,
     pub description: String,
+    /// Offset (en bytes desde el inicio del constructor) del `LEA` que carga la
+    /// VTable. Solo relevante para funciones; `None` para strings/vtables o
+    /// cuando no se conoce y hay que localizarlo por escaneo.
+    pub vtable_lea_hint: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,7 +27,6 @@ pub enum OffsetType {
     Function,
     VTable,
     StringRef,
-    Global,
 }
 
 /// Definición de un patrón a buscar
@@ -566,8 +569,10 @@ impl<'a> GameDumper<'a> {
         let patterns = Self::get_patterns();
         let mut found_count = 0;
 
-        // Para evitar duplicados cuando patrones similares matchean múltiples funciones,
-        // rastrear las direcciones ya usadas y seleccionar la correcta
+        // Muchas clases comparten una firma de constructor idéntica. Para no
+        // asignar el mismo address a dos nombres, se reparten las coincidencias
+        // de forma determinista: cada PatternDef toma la primera coincidencia
+        // (en orden de address) que aún no haya reclamado otro PatternDef.
         let mut used_addresses: HashMap<usize, String> = HashMap::new();
 
         for pat_def in &patterns {
@@ -583,23 +588,25 @@ impl<'a> GameDumper<'a> {
                 continue;
             }
 
-            // Seleccionar el resultado que no haya sido usado ya
-            let mut selected = None;
-            for result in &results {
-                if !used_addresses.contains_key(&result.address) {
-                    selected = Some(result.clone());
-                    break;
-                }
-            }
+            // Tomar la primera coincidencia libre. `pattern_scan` ya devuelve los
+            // resultados en orden ascendente de address, así que el reparto es
+            // estable entre ejecuciones.
+            let selected = results
+                .iter()
+                .find(|r| !used_addresses.contains_key(&r.address))
+                .cloned();
 
-            // Si todos están usados, tomar el siguiente disponible
-            if selected.is_none() && !results.is_empty() {
-                for result in &results {
-                    if used_addresses.get(&result.address).map(|n| n != pat_def.name).unwrap_or(true) {
-                        selected = Some(result.clone());
-                        break;
-                    }
-                }
+            // Si todas las coincidencias ya fueron reclamadas hay menos funciones
+            // en el binario que PatternDefs con esta firma: no se puede nombrar
+            // esta entrada sin duplicar un address, así que se omite con aviso.
+            if selected.is_none() {
+                println!(
+                    "  {} {} {}",
+                    "[!]".yellow(),
+                    pat_def.name.yellow(),
+                    "- omitido (todas las coincidencias de esta firma ya asignadas)".yellow()
+                );
+                continue;
             }
 
             if let Some(result) = selected {
@@ -627,6 +634,7 @@ impl<'a> GameDumper<'a> {
                     rva,
                     offset_type: pat_def.offset_type.clone(),
                     description: pat_def.description.to_string(),
+                    vtable_lea_hint: pat_def.vtable_lea_offset,
                 });
 
                 found_count += 1;
@@ -677,6 +685,7 @@ impl<'a> GameDumper<'a> {
                 rva,
                 offset_type: OffsetType::StringRef,
                 description: str_def.description.to_string(),
+                vtable_lea_hint: None,
             });
 
             found_count += 1;
@@ -691,7 +700,43 @@ impl<'a> GameDumper<'a> {
         );
     }
 
-    /// Resuelve VTables desde constructores encontrados
+    /// ¿Está `addr` dentro del rango virtual del módulo cargado?
+    fn in_module(&self, addr: usize) -> bool {
+        addr >= self.process.base_address
+            && addr < self.process.base_address + self.process.module_size
+    }
+
+    /// Lee un puntero (u64) directamente del volcado en memoria a partir de una
+    /// dirección absoluta. Devuelve `None` si cae fuera del buffer.
+    fn read_ptr_from_dump(&self, addr: usize) -> Option<usize> {
+        let rva = addr.checked_sub(self.process.base_address)?;
+        if rva + 8 > self.memory.len() {
+            return None;
+        }
+        Some(u64::from_le_bytes(self.memory[rva..rva + 8].try_into().ok()?) as usize)
+    }
+
+    /// Heurística de validación de VTable: una VTable real empieza con un
+    /// puntero a función virtual, es decir su primer slot apunta a código
+    /// dentro del propio módulo. Descarta LEAs que cargan strings, floats u
+    /// otros datos que no son tablas de métodos.
+    fn looks_like_vtable(&self, vtable_addr: usize) -> bool {
+        match self.read_ptr_from_dump(vtable_addr) {
+            Some(first_slot) => self.in_module(first_slot),
+            None => false,
+        }
+    }
+
+    /// Resuelve VTables desde constructores encontrados.
+    ///
+    /// Estrategia por constructor:
+    ///   1. Si el PatternDef declaró la posición del `LEA` de la VTable
+    ///      (`vtable_lea_hint`), se prueba primero; es la señal más fiable.
+    ///   2. Si no, se recorren los primeros 64 bytes buscando el primer `LEA`
+    ///      RIP-relative cuya dirección **parezca** una VTable (primer slot =
+    ///      puntero a código del módulo).
+    ///   3. Como último recurso se acepta el primer `LEA` dentro del módulo,
+    ///      preservando el comportamiento anterior.
     pub fn resolve_vtables(&mut self) {
         let mut resolved_vtables = Vec::new();
 
@@ -701,54 +746,73 @@ impl<'a> GameDumper<'a> {
             }
 
             let func_offset = offset.address - self.process.base_address;
-
-            // Buscar LEA instructions en los primeros 64 bytes del constructor
-            // que cargan la VTable: LEA rax, [rip+xxxx] ; 48 8D 05 xx xx xx xx
             let search_size = std::cmp::min(64, self.memory.len() - func_offset);
-            let func_bytes = &self.memory[func_offset..func_offset + search_size];
 
-            for i in 0..search_size.saturating_sub(7) {
-                let has_rex = func_bytes[i] == 0x48 || func_bytes[i] == 0x4C;
-                let is_lea = i + 1 < func_bytes.len() && func_bytes[i + 1] == 0x8D;
+            // (1) Intentar la posición declarada del LEA.
+            let mut chosen: Option<(usize, &'static str)> = None;
+            if let Some(hint) = offset.vtable_lea_hint {
+                if let Some(addr) =
+                    scanner::try_resolve_lea_at(self.memory, func_offset + hint, self.process.base_address)
+                {
+                    if self.in_module(addr) {
+                        chosen = Some((addr, "hint"));
+                    }
+                }
+            }
 
-                if has_rex && is_lea && i + 7 <= search_size {
-                    let modrm = func_bytes[i + 2];
-                    if modrm & 0xC7 == 0x05 {
-                        if let Some(vtable_addr) = scanner::resolve_rip_relative(
-                            self.memory,
-                            func_offset + i,
-                            self.process.base_address,
-                            7,
-                        ) {
-                            // Verificar que la dirección está en el rango del módulo
-                            if vtable_addr >= self.process.base_address
-                                && vtable_addr < self.process.base_address + self.process.module_size
-                            {
-                                let vtable_rva = vtable_addr - self.process.base_address;
-                                let vtable_name = format!("{}_VTable", offset.name.replace("::Ctor", "").replace("::Factory", ""));
-                                println!(
-                                    "  {} {} @ RVA {}{} (desde {})",
-                                    "[✓]".green(),
-                                    vtable_name.white().bold(),
-                                    "0x".bright_cyan(),
-                                    format!("{:X}", vtable_rva).cyan(),
-                                    offset.name.yellow()
-                                );
-
-                                resolved_vtables.push(DumpedOffset {
-                                    name: vtable_name,
-                                    category: offset.category.clone(),
-                                    address: vtable_addr,
-                                    rva: vtable_rva,
-                                    offset_type: OffsetType::VTable,
-                                    description: format!("VTable resuelta desde {}", offset.name),
-                                });
-
-                                break; // Solo tomar la primera VTable de cada constructor
-                            }
+            // (2)/(3) Escaneo de respaldo por los primeros 64 bytes.
+            if chosen.is_none() {
+                let mut first_in_module: Option<usize> = None;
+                for i in 0..search_size.saturating_sub(7) {
+                    if let Some(addr) = scanner::try_resolve_lea_at(
+                        self.memory,
+                        func_offset + i,
+                        self.process.base_address,
+                    ) {
+                        if !self.in_module(addr) {
+                            continue;
+                        }
+                        if first_in_module.is_none() {
+                            first_in_module = Some(addr);
+                        }
+                        if self.looks_like_vtable(addr) {
+                            chosen = Some((addr, "escaneo"));
+                            break;
                         }
                     }
                 }
+                if chosen.is_none() {
+                    if let Some(addr) = first_in_module {
+                        chosen = Some((addr, "fallback"));
+                    }
+                }
+            }
+
+            if let Some((vtable_addr, source)) = chosen {
+                let vtable_rva = vtable_addr - self.process.base_address;
+                let vtable_name = format!(
+                    "{}_VTable",
+                    offset.name.replace("::Ctor", "").replace("::Factory", "")
+                );
+                println!(
+                    "  {} {} @ RVA {}{} (desde {} · {})",
+                    "[✓]".green(),
+                    vtable_name.white().bold(),
+                    "0x".bright_cyan(),
+                    format!("{:X}", vtable_rva).cyan(),
+                    offset.name.yellow(),
+                    source.bright_black()
+                );
+
+                resolved_vtables.push(DumpedOffset {
+                    name: vtable_name,
+                    category: offset.category.clone(),
+                    address: vtable_addr,
+                    rva: vtable_rva,
+                    offset_type: OffsetType::VTable,
+                    description: format!("VTable resuelta desde {}", offset.name),
+                    vtable_lea_hint: None,
+                });
             }
         }
 

@@ -8,6 +8,9 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+/// Un generador de archivo: nombre de salida + función que produce su contenido.
+type FileGenerator = (&'static str, fn(&GameDumper) -> String);
+
 /// Genera la carpeta SDK completa
 /// Los offsets se guardan como RVA (Relative Virtual Address) para que sean
 /// independientes de ASLR. Para obtener la dirección real en runtime:
@@ -19,7 +22,7 @@ pub fn generate_sdk(output_dir: &str, dumper: &GameDumper) -> Result<usize, Stri
 
     let mut file_count = 0;
 
-    let generators: Vec<(&str, fn(&GameDumper) -> String)> = vec![
+    let generators: Vec<FileGenerator> = vec![
         ("SDK.h", generate_main_header),
         ("Offsets.h", generate_offsets),
         ("Player.h", generate_player),
@@ -77,30 +80,6 @@ fn addr_str(dumper: &GameDumper, name: &str) -> String {
         Some(o) => format!("0x{:X}", o.rva),
         None => "0x0 /* NO ENCONTRADO */".to_string(),
     }
-}
-
-fn format_offsets_block(dumper: &GameDumper, category: &str, offset_type_filter: Option<&str>) -> String {
-    let items = dumper.get_by_category(category);
-    let mut out = String::new();
-
-    for item in &items {
-        let type_str = match item.offset_type {
-            OffsetType::Function => "Function",
-            OffsetType::VTable => "VTable",
-            OffsetType::StringRef => "String",
-            OffsetType::Global => "Global",
-        };
-
-        if let Some(filter) = offset_type_filter {
-            if type_str != filter { continue; }
-        }
-
-        out.push_str(&format!(
-            "        constexpr uintptr_t {:<45} = {}; // {}\n",
-            item.name, format!("0x{:X}", item.rva), item.description
-        ));
-    }
-    out
 }
 
 // ============================================================
